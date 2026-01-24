@@ -149,6 +149,7 @@ static void smp_start_cpu(int index, int die, int cluster, int core, u64 impl, u
     if (!cpu_features->cyc_ovrd && (read64(impl) & RVBAR_ADDR) != (u64)_vectors_start) {
         printf("Failed! \n    RVBAR (=0x%lx) is locked and differs from entry point (=0x%lx)\n",
                read64(impl) & RVBAR_ADDR, (u64)_vectors_start);
+        return;
     }
 
     printf("Starting CPU %d (%d:%d:%d)... ", index, die, cluster, core);
