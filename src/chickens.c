@@ -106,6 +106,7 @@ const struct midr_part_features features_m3 = {
     .amx = true,
     .actlr_el2 = true,
     .counter_redirect = true,
+    .ahcr_el2 = true,
 };
 
 // XXX figure out what features are actually available on M4
