@@ -301,10 +301,14 @@ static int pcie_init_controller(int controller, const char *path)
         state->pcie_regs = &regs_t8140;
         printf("pcie: Initializing t8140 PCIe controller\n");
     } else if (adt_is_compatible(adt, adt_offset, "apcie,t8132")) {
-        // Base M4 (t8132) uses the same Everest-class PCIe controller layout
-        // as M4 Pro/Max (t8140). Reuse regs_t8140 verbatim as a starting point.
+        // Base M4 (t8132) shares the base-M3 (t8122) PCIe fabric layout:
+        // reg[2] is a packed 0x40000 block that holds phy_common + all phy
+        // banks, matching the T8122 branch which applies the
+        // phy_base += 0x8000 / phy_common_base += 0x4000 offset fix and
+        // uses the T8122-specific port register cascade. Using regs_t8140
+        // here was empirically wrong on j773g — port never left BUSY.
         fuse_bits = NULL;
-        state->pcie_regs = &regs_t8140;
+        state->pcie_regs = &regs_t8122;
         printf("pcie: Initializing t8132 PCIe controller\n");
     } else if (adt_is_compatible(adt, adt_offset, "apcie-ge,t6020")) {
         u32 lane_cfg;
@@ -723,7 +727,7 @@ static int pcie_init_controller(int controller, const char *path)
         if (poll32(state->port_base[port] + APCIE_PORT_STATUS, APCIE_PORT_STATUS_RUN,
                    APCIE_PORT_STATUS_RUN, 250000)) {
             printf("pcie: Port failed to come up on %s\n", bridge);
-            return -1;
+            continue;
         }
 
         if (state->pcie_regs->type == APCIE_T602X && controller != APCIE) {
@@ -738,7 +742,7 @@ static int pcie_init_controller(int controller, const char *path)
         if (poll32(state->port_base[port] + APCIE_PORT_LINKSTS, APCIE_PORT_LINKSTS_BUSY, 0,
                    250000)) {
             printf("pcie: Port failed to become idle on %s\n", bridge);
-            return -1;
+            continue;
         }
 
         /* Do it again? */
@@ -749,7 +753,7 @@ static int pcie_init_controller(int controller, const char *path)
             if (poll32(state->port_base[port] + APCIE_PORT_LINKSTS, APCIE_PORT_LINKSTS_BUSY, 0,
                        250000)) {
                 printf("pcie: Port failed to become idle (2) on %s\n", bridge);
-                return -1;
+                continue;
             }
 
             udelay(1000);
