@@ -37,10 +37,18 @@ void dockchannel_uart_putbyte(u8 c)
     if (!uart_base)
         return;
 
-    while (read32(uart_base + DATA_TX_FREE) == 0)
-        ;
-
-    write32(uart_base + DATA_TX8, c);
+    /*
+     * Bounded spin on TX_FREE. If the dockchannel peer stops draining the
+     * FIFO (observed on T8132 after iBoot handoff, e.g. after DCP dies),
+     * an unbounded spin here wedges the entire console pipeline. Drop the
+     * byte after the timeout rather than deadlock.
+     */
+    for (int i = 0; i < 100000; i++) {
+        if (read32(uart_base + DATA_TX_FREE) != 0) {
+            write32(uart_base + DATA_TX8, c);
+            return;
+        }
+    }
 }
 
 u8 dockchannel_uart_getbyte(void)
@@ -153,6 +161,13 @@ static struct iodev_ops iodev_dockchannel_uart_ops = {
 
 struct iodev iodev_dockchannel_uart = {
     .ops = &iodev_dockchannel_uart_ops,
-    .usage = USAGE_CONSOLE | USAGE_UARTPROXY,
+    /*
+     * DIAGNOSTIC: dropped USAGE_CONSOLE for T8132 bring-up. printf output
+     * still reaches USB CDC (ttyACM0) via iodev_usb_vuart / iodev_usbN, but
+     * bypasses dockchannel entirely so a wedged dockchannel peer cannot
+     * silently drop bytes or stall iodev_console_write. Dockchannel remains
+     * a valid UARTPROXY target if directly addressed.
+     */
+    .usage = USAGE_UARTPROXY,
     .lock = SPINLOCK_INIT,
 };
