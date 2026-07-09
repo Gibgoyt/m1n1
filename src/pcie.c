@@ -300,6 +300,12 @@ static int pcie_init_controller(int controller, const char *path)
         fuse_bits = NULL;
         state->pcie_regs = &regs_t8140;
         printf("pcie: Initializing t8140 PCIe controller\n");
+    } else if (adt_is_compatible(adt, adt_offset, "apcie,t8132")) {
+        // Base M4 (t8132) uses the same Everest-class PCIe controller layout
+        // as M4 Pro/Max (t8140). Reuse regs_t8140 verbatim as a starting point.
+        fuse_bits = NULL;
+        state->pcie_regs = &regs_t8140;
+        printf("pcie: Initializing t8132 PCIe controller\n");
     } else if (adt_is_compatible(adt, adt_offset, "apcie-ge,t6020")) {
         u32 lane_cfg;
         fuse_bits = NULL;
