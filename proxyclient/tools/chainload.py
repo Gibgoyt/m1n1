@@ -93,21 +93,7 @@ if args.xnu:
                 remove_oslog(nub)
 
 rvbar = entry & ~0xfff
-# iBoot locks the CPU impl_reg MMIO on Everest-class SoCs (M4/T8132 and up).
-# Writing to it posts an AXI SLVERR that surfaces as an async SError inside
-# the running m1n1 and wedges the whole session. Skip the write on those
-# chips; the C-side m1n1 already avoids it (see 'smp: don't write rvbar
-# when !cyc_ovrd'). Once P_GET_CPU_FEATURES is wired up here we can gate on
-# cpu_features->cyc_ovrd directly instead of a chip_id list.
-EVEREST_LOCKED_IMPL_REG = {0x8132, 0x8140}
-try:
-    chip_id = u.adt["/chosen"].chip_id
-except Exception:
-    chip_id = None
-
-if rvbar != u.base and chip_id in EVEREST_LOCKED_IMPL_REG:
-    print(f"Skipping secondary CPU RVBAR writes (chip_id=0x{chip_id:x}, impl_reg MMIO is locked)")
-elif rvbar != u.base:
+if rvbar != u.base:
     print("Setting secondary CPU RVBARs...")
 
     for cpu in u.adt["cpus"]:
