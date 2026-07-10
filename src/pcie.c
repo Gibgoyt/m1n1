@@ -503,7 +503,7 @@ static int pcie_init_controller(int controller, const char *path)
         }
 
         if (state->pcie_regs->type == APCIE_T81XX || state->pcie_regs->type == APCIE_T602X ||
-            state->pcie_regs->compat == APCIE_T8122) {
+            state->pcie_regs->compat == APCIE_T8122 || state->pcie_regs->type == APCIE_T8140) {
             char pll_prop[64];
             char auspma_prop[64];
 
