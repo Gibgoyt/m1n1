@@ -270,8 +270,9 @@ struct phy_ip_tunable {
     u64 value;
 } PACKED;
 
-static int tunables_apply_phy_ip_filtered(const char *path, int adt_offset, const char *prop,
-                                          uintptr_t base, u32 port_count)
+static int __attribute__((unused))
+tunables_apply_phy_ip_filtered(const char *path, int adt_offset, const char *prop, uintptr_t base,
+                               u32 port_count)
 {
     u32 prop_len;
     const struct phy_ip_tunable *tunables = adt_getprop(adt, adt_offset, prop, &prop_len);
@@ -595,19 +596,19 @@ static int pcie_init_controller(int controller, const char *path)
             }
 
             if (adt_is_compatible(adt, adt_offset, "apcie,t8132")) {
-                /* j773g: skip absent-port phy_ip slices (see helper above). */
-                if (tunables_apply_phy_ip_filtered(path, adt_offset, pll_prop,
-                                                   state->phy_ip_base[phy],
-                                                   state->port_count)) {
-                    printf("pcie: Error applying %s for %s\n", pll_prop, path);
-                    return -1;
-                }
-                if (tunables_apply_phy_ip_filtered(path, adt_offset, auspma_prop,
-                                                   state->phy_ip_base[phy],
-                                                   state->port_count)) {
-                    printf("pcie: Error applying %s for %s\n", auspma_prop, path);
-                    return -1;
-                }
+                /* t8132: phy_ip does NOT decode until per-port bring-up has
+                 * run (j773g evidence, RUNs A..12 + pcie_up_1 vs pcie_up_2:
+                 * the pre-6b277bc build without this block returned 0 here;
+                 * the first build with it wedged inside pcie_init). Applying
+                 * these tunables at this point -- before the per-port loop --
+                 * AXI-stalls the fabric on the FIRST shared pll entry at
+                 * phy_ip+0x38, with the intermediate printfs stuck in the
+                 * console buffer. Skip; the host applies them post-init via
+                 * the proxy (AppleSiliconM4 RUN 13). Once the exact ungating
+                 * per-port step is known, tunables_apply_phy_ip_filtered()
+                 * above is the in-C fix candidate at the right point. */
+                printf("pcie: t8132: skipping phy-ip tunables pre-port-init "
+                       "(host applies post-init)\n");
             } else {
                 if (tunables_apply_local_addr(path, pll_prop, state->phy_ip_base[phy])) {
                     printf("pcie: Error applying %s for %s\n", pll_prop, path);
