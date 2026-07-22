@@ -1,11 +1,28 @@
 /* SPDX-License-Identifier: MIT */
 
 #include "adt.h"
+#include "iodev.h"
 #include "pcie.h"
 #include "pmgr.h"
 #include "string.h"
 #include "tunables.h"
 #include "utils.h"
+
+/*
+ * Breadcrumb printf with guaranteed delivery. Console output is buffered
+ * in an 8 KB ring drained by the main loop; during a long proxy request
+ * (P_PCIE_INIT) a CPU hang (AXI stall) loses everything still in the
+ * ring -- on j773g only the first line of pcie_init ever reached the
+ * host, making wedges unlocatable. iodev_console_flush() spins the USB
+ * event handler until the TX ring drains (the same mechanism the
+ * exception handlers use), so each breadcrumb escapes before the next
+ * potentially-fatal MMIO.
+ */
+#define PCIE_BC(...)                                                                               \
+    do {                                                                                           \
+        printf(__VA_ARGS__);                                                                       \
+        iodev_console_flush();                                                                     \
+    } while (0)
 
 /*
  * The ADT uses 17 register sets:
@@ -500,12 +517,14 @@ static int pcie_init_controller(int controller, const char *path)
     }
 
     int port_reg_cnt = port_regs / state->port_count;
-    printf("pcie: ADT uses %d reg entries per port\n", port_reg_cnt);
+    PCIE_BC("pcie: ADT uses %d reg entries per port\n", port_reg_cnt);
 
+    PCIE_BC("pcie: BC pmgr power enable...\n");
     if (pmgr_adt_power_enable(path)) {
         printf("pcie: Error enabling power for %s\n", path);
         return -1;
     }
+    PCIE_BC("pcie: BC pmgr power enable done\n");
 
     if (!adt_getprop(adt, adt_offset, "apcie-axi2af-tunables", NULL)) {
         printf("pcie: No axi2af tunables\n");
@@ -513,6 +532,7 @@ static int pcie_init_controller(int controller, const char *path)
         printf("pcie: Error applying %s for %s\n", "apcie-axi2af-tunables", path);
         return -1;
     }
+    PCIE_BC("pcie: BC axi2af tunables done\n");
 
     /* ??? */
     if (controller == APCIE)
@@ -524,6 +544,7 @@ static int pcie_init_controller(int controller, const char *path)
         printf("pcie: Error applying %s for %s\n", "apcie-common-tunables", path);
         return -1;
     }
+    PCIE_BC("pcie: BC common tunables done\n");
 
     /*
      * Initialize PHY.
@@ -535,6 +556,7 @@ static int pcie_init_controller(int controller, const char *path)
         printf("pcie: Error applying %s for %s\n", "apcie-phy-tunables", path);
         return -1;
     }
+    PCIE_BC("pcie: BC phy tunables done\n");
 
     if (state->pcie_regs->type == APCIE_T602X || state->pcie_regs->type == APCIE_T6031) {
         if (poll32(state->phy_common_base + APCIE_PHYCMN_CLK, APCIE_PHYCMN_CLK_100MHZ,
@@ -572,6 +594,8 @@ static int pcie_init_controller(int controller, const char *path)
             set32(state->phy_base[phy] + 4, 0x01);
         }
 
+        PCIE_BC("pcie: BC phy %d CLK handshake done\n", phy);
+
         /* Apply "fuses". */
         for (int i = 0; fuse_bits && fuse_bits[i].width; i++) {
             u32 fuse;
@@ -607,8 +631,8 @@ static int pcie_init_controller(int controller, const char *path)
                  * the proxy (AppleSiliconM4 RUN 13). Once the exact ungating
                  * per-port step is known, tunables_apply_phy_ip_filtered()
                  * above is the in-C fix candidate at the right point. */
-                printf("pcie: t8132: skipping phy-ip tunables pre-port-init "
-                       "(host applies post-init)\n");
+                PCIE_BC("pcie: t8132: skipping phy-ip tunables pre-port-init "
+                        "(host applies post-init)\n");
             } else {
                 if (tunables_apply_local_addr(path, pll_prop, state->phy_ip_base[phy])) {
                     printf("pcie: Error applying %s for %s\n", pll_prop, path);
@@ -657,6 +681,7 @@ static int pcie_init_controller(int controller, const char *path)
             printf("pcie: Failed to initialize RC thing\n");
             return -1;
         }
+        PCIE_BC("pcie: BC shared init done (rc handshake ok)\n");
         if (state->pcie_regs->type == APCIE_T602X) {
             if (controller == APCIE)
                 clear32(state->rc_base + 0x3c, 0x1);
@@ -687,7 +712,7 @@ static int pcie_init_controller(int controller, const char *path)
         if ((bridge_offset = adt_path_offset(adt, bridge)) < 0)
             continue;
 
-        printf("pcie: Initializing port %d\n", port);
+        PCIE_BC("pcie: Initializing port %d\n", port);
 
         if (adt_get_reg(adt, adt_path, "reg",
                         port * port_reg_cnt + state->pcie_regs->shared_reg_count,
@@ -941,13 +966,14 @@ static int pcie_init_controller(int controller, const char *path)
                 write32(state->port_base[port] + APCIE_T602X_PORT_MSIMAP + 4 * i, 0x80000000 | i);
         }
 
-        read32(state->port_base[port] + APCIE_PORT_LINKSTS);
+        u32 port_linksts = read32(state->port_base[port] + APCIE_PORT_LINKSTS);
+        PCIE_BC("pcie: BC port %d init done LINKSTS=0x%x\n", port, port_linksts);
 
         /* Move to the next PCIe device on this bus. */
         config_base += (1 << 15);
     }
 
-    printf("pcie: Initialized controller %d\n", controller);
+    PCIE_BC("pcie: Initialized controller %d\n", controller);
     state->initialized = true;
 
     return 0;
