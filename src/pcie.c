@@ -250,6 +250,85 @@ struct state {
 
 static struct state controllers[NUM_CONTROLLERS];
 
+/*
+ * j773g (t8132) has no pci-bridge1, but the ADT's apcie-phy-ip-*-tunables
+ * still carry entries targeting port 1's slice of the shared phy_ip window
+ * (offsets 0x8000 + 0x8000 * port). Writing into an absent port's unpowered
+ * slice AXI-stalls the fabric and wedges m1n1 hard with no recovery
+ * (observed 2026-07-11 on j773g: all shared pll entries applied fine, the
+ * first port-1 auspma entry killed the UART). Apply entry-by-entry and skip
+ * entries whose offset falls in a slice whose pci-bridge node is absent.
+ */
+#define PHYIP_PORT_SLICE_BASE   0x8000
+#define PHYIP_PORT_SLICE_STRIDE 0x8000
+#define PHYIP_MAX_PORTS         8
+
+struct phy_ip_tunable {
+    u32 offset;
+    u32 size;
+    u64 mask;
+    u64 value;
+} PACKED;
+
+static int tunables_apply_phy_ip_filtered(const char *path, int adt_offset, const char *prop,
+                                          uintptr_t base, u32 port_count)
+{
+    u32 prop_len;
+    const struct phy_ip_tunable *tunables = adt_getprop(adt, adt_offset, prop, &prop_len);
+
+    if (!tunables || !prop_len) {
+        printf("pcie: Error getting %s property %s\n", path, prop);
+        return -1;
+    }
+    if (prop_len % sizeof(*tunables)) {
+        printf("pcie: %s length %d not a multiple of %d\n", prop, prop_len,
+               (int)sizeof(*tunables));
+        return -1;
+    }
+
+    bool port_present[PHYIP_MAX_PORTS];
+    for (u32 port = 0; port < PHYIP_MAX_PORTS; port++) {
+        char bridge[64];
+        snprintf(bridge, sizeof(bridge), "%s/pci-bridge%d", path, port);
+        port_present[port] = port < port_count && adt_path_offset(adt, bridge) >= 0;
+    }
+
+    u32 applied = 0, skipped = 0;
+    for (u32 i = 0; i < prop_len / sizeof(*tunables); i++) {
+        const struct phy_ip_tunable *t = &tunables[i];
+
+        if (t->offset >= PHYIP_PORT_SLICE_BASE) {
+            u32 idx = (t->offset - PHYIP_PORT_SLICE_BASE) / PHYIP_PORT_SLICE_STRIDE;
+            if (idx >= PHYIP_MAX_PORTS || !port_present[idx]) {
+                skipped++;
+                continue;
+            }
+        }
+
+        switch (t->size) {
+            case 1:
+                mask8(base + t->offset, t->mask, t->value);
+                break;
+            case 2:
+                mask16(base + t->offset, t->mask, t->value);
+                break;
+            case 4:
+                mask32(base + t->offset, t->mask, t->value);
+                break;
+            case 8:
+                mask64(base + t->offset, t->mask, t->value);
+                break;
+            default:
+                printf("pcie: unknown tunable size 0x%08x in %s\n", t->size, prop);
+                return -1;
+        }
+        applied++;
+    }
+    printf("pcie: %s: applied %d, skipped %d (absent-port phy_ip slices)\n", prop, applied,
+           skipped);
+    return 0;
+}
+
 static int pcie_init_controller(int controller, const char *path)
 {
     struct state *state = &controllers[controller];
@@ -515,13 +594,29 @@ static int pcie_init_controller(int controller, const char *path)
                 snprintf(auspma_prop, sizeof(auspma_prop), "apcie-phy-%d-ip-auspma-tunables", phy);
             }
 
-            if (tunables_apply_local_addr(path, pll_prop, state->phy_ip_base[phy])) {
-                printf("pcie: Error applying %s for %s\n", pll_prop, path);
-                return -1;
-            }
-            if (tunables_apply_local_addr(path, auspma_prop, state->phy_ip_base[phy])) {
-                printf("pcie: Error applying %s for %s\n", auspma_prop, path);
-                return -1;
+            if (adt_is_compatible(adt, adt_offset, "apcie,t8132")) {
+                /* j773g: skip absent-port phy_ip slices (see helper above). */
+                if (tunables_apply_phy_ip_filtered(path, adt_offset, pll_prop,
+                                                   state->phy_ip_base[phy],
+                                                   state->port_count)) {
+                    printf("pcie: Error applying %s for %s\n", pll_prop, path);
+                    return -1;
+                }
+                if (tunables_apply_phy_ip_filtered(path, adt_offset, auspma_prop,
+                                                   state->phy_ip_base[phy],
+                                                   state->port_count)) {
+                    printf("pcie: Error applying %s for %s\n", auspma_prop, path);
+                    return -1;
+                }
+            } else {
+                if (tunables_apply_local_addr(path, pll_prop, state->phy_ip_base[phy])) {
+                    printf("pcie: Error applying %s for %s\n", pll_prop, path);
+                    return -1;
+                }
+                if (tunables_apply_local_addr(path, auspma_prop, state->phy_ip_base[phy])) {
+                    printf("pcie: Error applying %s for %s\n", auspma_prop, path);
+                    return -1;
+                }
             }
         }
 
