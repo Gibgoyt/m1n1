@@ -365,6 +365,14 @@ static int pcie_init_controller(int controller, const char *path)
         return -1;
     }
 
+    /* AppleSiliconM4 RUN 22: run the T602X LTSSM-enable writes in-window on
+     * the t8132 path. t8132 maps to regs_t8140, so the T602X-gated arm
+     * (rc_base+0x3c), port+0x10, and the LTSSM kick (incl ltssm+0x14 START)
+     * never run -- and they are write-locked once pcie_init returns, so the
+     * host proxy cannot replay them (RUNs 20/21). Gate them on this flag,
+     * WITHOUT touching the phy_ip/PHY_CTRL writes that SError on j773g. */
+    bool t8132 = adt_is_compatible(adt, adt_offset, "apcie,t8132");
+
     if (adt_is_compatible(adt, adt_offset, "apcie,t8103")) {
         fuse_bits = pcie_fuse_bits_t8103;
         state->pcie_regs = &regs_t8xxx_t600x;
@@ -758,6 +766,24 @@ static int pcie_init_controller(int controller, const char *path)
                 write32(state->port_base[port] + 0x10, 0x2);
         }
 
+        /* RUN 22 in-window arm + port+0x10 (T602X path 753-759, gated to
+         * t8132 here). rc_base+0x3c bit0 is the write-enable/arm latch for
+         * the port+ltssm aperture; the host proxy read it back 0 every time
+         * (RUN 20/21 seq-A). Read it back in-window -- if it now holds 0x1
+         * that is the first proof the aperture arms during pcie_init. */
+        if (t8132) {
+            PCIE_BC("pcie: BC t8132 arm rc_base+0x3c (pre=0x%x)\n",
+                    read32(state->rc_base + 0x3c));
+            set32(state->rc_base + 0x3c, 0x1);
+            PCIE_BC("pcie: BC t8132 arm rc_base+0x3c (post=0x%x)\n",
+                    read32(state->rc_base + 0x3c));
+            if (controller == APCIE) {
+                write32(state->port_base[port] + 0x10, 0x2);
+                PCIE_BC("pcie: BC t8132 port %d +0x10 (post=0x%x)\n", port,
+                        read32(state->port_base[port] + 0x10));
+            }
+        }
+
         if (state->pcie_regs->type == APCIE_T6031) {
             clear32(state->axi_base + 0x600, BIT(16));
         }
@@ -863,10 +889,38 @@ static int pcie_init_controller(int controller, const char *path)
             clear32(state->port_base[port] + APCIE_PORT_APPCLK, 0x100);
         }
 
+        /* RUN 22: kick LTSSM in-window on t8132 (the T602X kick above and
+         * the "do it again" block below never run on our T8140/APCIE path).
+         * Placed BEFORE the idle poll so the continue on timeout cannot skip
+         * it -- BUSY never clears at that poll on j773g. This mirrors the
+         * 899-915 "do it again" body: reset cycle, settle, then the ltssm
+         * kick incl 0x14=START. ltssm+0x14 read back 0 every time from the
+         * host (RUN 20/21); this readback is the pivotal in-window datum. */
+        if (t8132 && controller == APCIE) {
+            clear32(state->port_base[port] + APCIE_T602X_PORT_RESET, APCIE_PORT_RESET_DIS);
+            set32(state->port_base[port] + APCIE_T602X_PORT_RESET, APCIE_PORT_RESET_DIS);
+            udelay(1000);
+            write32(state->port_ltssm_base[port] + 0x10, 0x2);
+            write32(state->port_ltssm_base[port] + 0x1c, 0x4);
+            set32(state->port_ltssm_base[port] + 0x20, 0x2);
+            write32(state->port_ltssm_base[port] + 0x14, 0x1);
+            clear32(state->port_base[port] + APCIE_PORT_APPCLK, 0x100);
+            PCIE_BC("pcie: BC t8132 port %d LTSSM kick: ltssm+0x14=0x%x "
+                    "LINKSTS=0x%x\n", port,
+                    read32(state->port_ltssm_base[port] + 0x14),
+                    read32(state->port_base[port] + APCIE_PORT_LINKSTS));
+        }
+
         if (poll32(state->port_base[port] + APCIE_PORT_LINKSTS, APCIE_PORT_LINKSTS_BUSY, 0,
                    250000)) {
             printf("pcie: Port failed to become idle on %s\n", bridge);
-            continue;
+            /* RUN 22: on t8132, do NOT bail on the idle-poll timeout -- BUSY
+             * never clears here on j773g, but we still want the rest of the
+             * port body (RC/DWC config, disarm, LINKSTS breadcrumb) to run so
+             * the aperture is armed/disarmed correctly and we get the full
+             * post-init state. The other SoCs keep the original continue. */
+            if (!t8132)
+                continue;
         }
 
         /* Do it again? */
@@ -962,6 +1016,20 @@ static int pcie_init_controller(int controller, const char *path)
                 write32(state->port_intr2axi_base[port] + 0x80, 0x1);
 
             clear32(state->rc_base + 0x3c, 0x1);
+            for (int i = 0; i < 32; i++)
+                write32(state->port_base[port] + APCIE_T602X_PORT_MSIMAP + 4 * i, 0x80000000 | i);
+        }
+
+        /* RUN 22: t8132 post-port epilogue mirroring the T602X block above
+         * (753-759 arm is disarmed here). */
+        if (t8132) {
+            write32(state->port_base[port] + 0x4020, 0x3);
+            if (state->port_intr2axi_base[port])
+                write32(state->port_intr2axi_base[port] + 0x80, 0x1);
+
+            clear32(state->rc_base + 0x3c, 0x1);
+            PCIE_BC("pcie: BC t8132 port %d disarm rc_base+0x3c (post=0x%x)\n",
+                    port, read32(state->rc_base + 0x3c));
             for (int i = 0; i < 32; i++)
                 write32(state->port_base[port] + APCIE_T602X_PORT_MSIMAP + 4 * i, 0x80000000 | i);
         }
